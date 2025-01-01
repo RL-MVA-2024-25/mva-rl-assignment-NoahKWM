@@ -2,7 +2,7 @@ from gymnasium.wrappers import TimeLimit
 from env_hiv import HIVPatient
 
 env = TimeLimit(
-    env=HIVPatient(domain_randomization=False), max_episode_steps=200
+    env=HIVPatient(domain_randomization=True), max_episode_steps=200
 )  # The time wrapper limits the number of steps in an episode at 200.
 # Now is the floor is yours to implement the agent and train it.
 
@@ -15,6 +15,9 @@ import random
 import numpy as np
 from collections import deque
 from tqdm import tqdm
+from copy import deepcopy
+import matplotlib.pyplot as plt
+from evaluate import evaluate_HIV
 
 # Device
 DEVICE = torch.device("mps" if torch.backends.mps.is_available() else ("cuda" if torch.cuda.is_available() else "cpu"))
@@ -25,158 +28,176 @@ class QNetwork(nn.Module):
     def __init__(self, input_dim, output_dim):
         super(QNetwork, self).__init__()
         self.model = nn.Sequential(
-            nn.Linear(input_dim, 128),
+            nn.Linear(input_dim, 256),
             nn.ReLU(),
-            nn.Linear(128, 128),
+            nn.Linear(256, 512),
             nn.ReLU(),
-            nn.Linear(128, output_dim)
+            nn.Linear(512, 512),
+            nn.ReLU(),
+            nn.Linear(512, 512),
+            nn.ReLU(),
+            nn.Linear(512, 512),
+            nn.ReLU(),
+            nn.Linear(512, 256),
+            nn.ReLU(),
+            nn.Linear(256, output_dim)
         )
 
     def forward(self, x):
         return self.model(x)
 
-# Replay Buffer to store transitions
+
 class ReplayBuffer:
-    def __init__(self, capacity):
-        self.buffer = []
-        self.capacity = capacity
-
-    def add(self, state, action, reward, next_state, done):
-        """
-        Ajoute une transition au buffer.
-        """
-        if len(self.buffer) >= self.capacity:
-            self.buffer.pop(0)  # Supprime l'élément le plus ancien
-        self.buffer.append((state, action, reward, next_state, done))
-
+    def __init__(self, capacity, device):
+        self.capacity = capacity # capacity of the buffer
+        self.data = []
+        self.index = 0 # index of the next cell to be filled
+        self.device = device
+    def append(self, s, a, r, s_, d):
+        if len(self.data) < self.capacity:
+            self.data.append(None)
+        self.data[self.index] = (s, a, r, s_, d)
+        self.index = (self.index + 1) % self.capacity
     def sample(self, batch_size):
-        """
-        Retourne un échantillon aléatoire de transitions.
-        """
-        return random.sample(self.buffer, batch_size)
-
-    def size(self):
-        return len(self.buffer)
-
+        batch = random.sample(self.data, batch_size)
+        return list(map(lambda x:torch.Tensor(np.array(x)).to(self.device), list(zip(*batch))))
+    def __len__(self):
+        return len(self.data)
 
 
 # You have to implement your own agent.
 # Don't modify the methods names and signatures, but you can add methods.
 # ENJOY!
 class ProjectAgent:
-    def __init__(self, state_dim=env.observation_space.shape[0], action_dim=env.action_space.n
-, buffer_size=1000, batch_size=64, gamma=0.99, lr=1e-3):
-        self.state_dim = state_dim
-        self.action_dim = action_dim
+    def __init__(self, buffer_size=10000, batch_size=256, lr=1e-3):
+        self.state_dim = env.observation_space.shape[0]
+        self.action_dim = env.action_space.n
         self.batch_size = batch_size
-        self.gamma = gamma
-        self.epsilon = 1.0  # Initial exploration rate
-        self.epsilon_min = 0.1
-        self.epsilon_decay = 0.995
+        self.gamma = 0.98
         self.device = DEVICE
 
+        # epsilon
+        self.epsilon_max = 1.0
+        self.epsilon_min = 0.01
+        self.epsilon_decay = 0.995
+        self.epsilon_delay = 600
+        self.epsilon_step = (self.epsilon_max - self.epsilon_min) / 15000
+
         # Q-Networks
-        self.q_network = QNetwork(state_dim, action_dim).to(self.device)
-        self.target_network = QNetwork(state_dim, action_dim).to(self.device)
+        self.q_network = QNetwork(self.state_dim, self.action_dim).to(self.device)
+        self.target_network = deepcopy(self.q_network)
         self.target_network.load_state_dict(self.q_network.state_dict())
         self.target_network.eval()
 
-        # Optimizer
-        self.optimizer = optim.Adam(self.q_network.parameters(), lr=lr)
-
         # Replay Buffer
-        self.replay_buffer = ReplayBuffer(buffer_size)
-    def act(self, observation, use_random=False):
-        if use_random or (np.random.rand() < self.epsilon):
-            return np.random.choice(self.action_dim)
-        observation = torch.FloatTensor(observation).unsqueeze(0).to(self.device)
-        with torch.no_grad():
-            q_values = self.q_network(observation)
-        return torch.argmax(q_values).item()
+        self.replay_buffer = ReplayBuffer(buffer_size, DEVICE)
 
+        # Gradient steps
+        self.nb_gradient_steps = 5
+        self.criterion = nn.SmoothL1Loss()
+        self.optimizer = optim.Adam(self.q_network.parameters(), lr=lr)
+        
+        # Scheduler
+        # self.scheduler = optim.lr_scheduler.StepLR(
+        #     self.optimizer, step_size=600, gamma=0.9
+        # ) 
+
+        # Update target network
+        self.update_target_strategy = 'ema' # 'replace'  'ema'
+        self.update_target_freq = 200
+        self.update_target_tau = 0.001
+
+    def act(self, observation, use_random=False):
+        with torch.no_grad():
+            observation = torch.Tensor(observation).unsqueeze(0).to(self.device)
+            q_values = self.q_network(observation)
+            return torch.argmax(q_values).item()
+    
     def save(self, path):
         torch.save(self.q_network.state_dict(), path)
-
-
+    
     def load(self):
-        self.q_network.load_state_dict(torch.load("q_network.pth", map_location=self.device))
+        self.q_network.load_state_dict(torch.load("q_network_best_final.pth", map_location=self.device, weights_only=True))
 
-    def train_step(self):
-        if self.replay_buffer.size() < self.batch_size:
-            return
+    def gradient_step(self, double_dqn=False):
+        if len(self.replay_buffer) > self.batch_size:
+            X, A, R, Y, D = self.replay_buffer.sample(self.batch_size)
 
-        # Sample a batch of transitions
-        batch = self.replay_buffer.sample(self.batch_size)
-        states, actions, rewards, next_states, dones = zip(*batch)
+            if double_dqn:
+                with torch.no_grad():
+                    next_actions = self.q_network(Y).argmax(1)
+                    QYmax = self.target_network(Y).gather(1, next_actions.unsqueeze(1)).squeeze(1)
+            else:
+                QYmax = self.target_network(Y).max(1)[0].detach()
+            update = torch.addcmul(R, 1 - D, QYmax, value=self.gamma).unsqueeze(1)
+            QXA = self.q_network(X).gather(1, A.to(torch.long).unsqueeze(1))
+            loss = self.criterion(QXA, update)
+            self.optimizer.zero_grad()
+            loss.backward()
+            self.optimizer.step()
 
-        states = torch.FloatTensor(np.array(states)).to(self.device)
-        actions = torch.LongTensor(actions).to(self.device)
-        rewards = torch.FloatTensor(rewards).to(self.device)
-        next_states = torch.FloatTensor(np.array(next_states)).to(self.device)
-        dones = torch.FloatTensor(dones).to(self.device)
+            # self.scheduler.step()
 
-        # Compute Q values
-        q_values = self.q_network(states).gather(1, actions.unsqueeze(1)).squeeze(1)
-
-        # Compute target Q values
-        with torch.no_grad():
-            max_next_q_values = self.target_network(next_states).max(1)[0]
-            target_q_values = rewards + self.gamma * max_next_q_values * (1 - dones)
-
-        # Loss
-        loss = nn.MSELoss()(q_values, target_q_values)
-
-        # Optimize
-        self.optimizer.zero_grad()
-        loss.backward()
-        self.optimizer.step()
-
-    def update_target_network(self):
-        self.target_network.load_state_dict(self.q_network.state_dict())
-
-
-# Train the agent
-def train():
-    """
-    Fonction principale pour entraîner l'agent.
-    """
-    num_episodes = 20
-    max_steps_per_episode = 200
-    target_update_freq = 10
-
-    # Agent initialisation
-    agent = ProjectAgent()
-
-    for episode in tqdm(range(num_episodes), desc="Training Episodes"):
+    def train(self, max_episode):
+        episode_rewards = []
+        episode_scores = []
+        episode = 0
+        episode_cum_reward = 0
         state, _ = env.reset()
-        total_reward = 0
+        epsilon = self.epsilon_max
+        step = 0
+        best_score = -np.inf
 
-        for step in tqdm(range(max_steps_per_episode), desc=f"Episode {episode + 1}", leave=False):
-            # Action selection
-            action = agent.act(state, use_random=True)
-            # One step
-            next_state, reward, done, truncated, _ = env.step(action)
-            # Store transition in the replay buffer
-            agent.replay_buffer.add(state, action, reward, next_state, done)
-            # Train the agent on a batch
-            agent.train_step()
-            # Update state
-            state = next_state
-            total_reward += reward
-            # Check if the episode is done
-            if done or truncated:
-                break
+        with tqdm(total=max_episode, desc="Training Episodes") as episode_bar:
+            while episode < max_episode:
+                # update epsilon
+                if step > self.epsilon_delay:
+                    epsilon = max(self.epsilon_min, epsilon - self.epsilon_step)
+                if np.random.rand() < epsilon:
+                    action = env.action_space.sample()
+                else:
+                    action = self.act(state)
+                # step
+                next_state, reward, done, trunc, _ = env.step(action)
+                self.replay_buffer.append(state, action, reward, next_state, done)
+                episode_cum_reward += reward
+                # train
+                for _ in range(self.nb_gradient_steps):
+                    self.gradient_step(double_dqn=False)
+                # update target network if needed
+                if self.update_target_strategy == 'replace':
+                    if step % self.update_target_freq == 0: 
+                        self.target_network.load_state_dict(self.q_network.state_dict())
+                if self.update_target_strategy == 'ema':
+                    target_state_dict = self.target_network.state_dict()
+                    model_state_dict = self.q_network.state_dict()
+                    tau = self.update_target_tau
+                    for key in model_state_dict:
+                        target_state_dict[key] = tau*model_state_dict[key] + (1-tau)*target_state_dict[key]
+                    self.target_network.load_state_dict(target_state_dict)
+                # next step
+                step += 1
+                if done or trunc:
+                    score = evaluate_HIV(self, nb_episode=1)
+                    episode_scores.append(score)
+                    episode += 1
+                    episode_rewards.append(episode_cum_reward)
+                    episode_bar.set_postfix({"Episode Return": episode_cum_reward, "Epsilon": epsilon})
+                    episode_bar.update(1)
+                    state, _ = env.reset()
+                    episode_cum_reward = 0
+                    # Save the best model
+                    if episode_scores[-1] > best_score:
+                        best_score = episode_scores[-1]
+                        self.save("q_network_best.pth")
 
-        # Update target network periodically
-        if (episode + 1) % target_update_freq == 0:
-            agent.update_target_network()
-
-        print(f"Episode {episode + 1}: total reward = {total_reward}")
-
-    # Save the model
-    agent.save("q_network.pth")
-    print("Model saved")
-
+                else:
+                    state = next_state
+        return episode_rewards, episode_scores
 
 if __name__ == "__main__":
-    train()
+    agent = ProjectAgent()
+    rewards, scores = agent.train(200)
+
+    plt.plot(scores)
+    plt.show()
