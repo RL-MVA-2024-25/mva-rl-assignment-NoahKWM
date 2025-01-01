@@ -29,17 +29,13 @@ class QNetwork(nn.Module):
         super(QNetwork, self).__init__()
         self.model = nn.Sequential(
             nn.Linear(input_dim, 256),
-            nn.ReLU(),
+            nn.LeakyReLU(),
             nn.Linear(256, 512),
-            nn.ReLU(),
+            nn.LeakyReLU(),
             nn.Linear(512, 512),
-            nn.ReLU(),
-            nn.Linear(512, 512),
-            nn.ReLU(),
-            nn.Linear(512, 512),
-            nn.ReLU(),
+            nn.LeakyReLU(),
             nn.Linear(512, 256),
-            nn.ReLU(),
+            nn.LeakyReLU(),
             nn.Linear(256, output_dim)
         )
 
@@ -69,7 +65,7 @@ class ReplayBuffer:
 # Don't modify the methods names and signatures, but you can add methods.
 # ENJOY!
 class ProjectAgent:
-    def __init__(self, buffer_size=10000, batch_size=256, lr=1e-3):
+    def __init__(self, buffer_size=10000, batch_size=128, lr=1e-3):
         self.state_dim = env.observation_space.shape[0]
         self.action_dim = env.action_space.n
         self.batch_size = batch_size
@@ -80,8 +76,8 @@ class ProjectAgent:
         self.epsilon_max = 1.0
         self.epsilon_min = 0.01
         self.epsilon_decay = 0.995
-        self.epsilon_delay = 600
-        self.epsilon_step = (self.epsilon_max - self.epsilon_min) / 15000
+        self.epsilon_delay = 1500
+        self.epsilon_step = (self.epsilon_max - self.epsilon_min) / 20000
 
         # Q-Networks
         self.q_network = QNetwork(self.state_dim, self.action_dim).to(self.device)
@@ -105,7 +101,7 @@ class ProjectAgent:
         # Update target network
         self.update_target_strategy = 'ema' # 'replace'  'ema'
         self.update_target_freq = 200
-        self.update_target_tau = 0.001
+        self.update_target_tau = 0.0005
 
     def act(self, observation, use_random=False):
         with torch.no_grad():
@@ -117,7 +113,7 @@ class ProjectAgent:
         torch.save(self.q_network.state_dict(), path)
     
     def load(self):
-        self.q_network.load_state_dict(torch.load("q_network_best_final.pth", map_location=self.device, weights_only=True))
+        self.q_network.load_state_dict(torch.load("q_network_best_final2.pth", map_location=self.device, weights_only=True))
 
     def gradient_step(self, double_dqn=False):
         if len(self.replay_buffer) > self.batch_size:
@@ -197,7 +193,7 @@ class ProjectAgent:
 
 if __name__ == "__main__":
     agent = ProjectAgent()
-    rewards, scores = agent.train(200)
+    rewards, scores = agent.train(300)
 
     plt.plot(scores)
     plt.show()
