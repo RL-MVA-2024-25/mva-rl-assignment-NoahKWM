@@ -14,7 +14,6 @@ import torch.optim as optim
 import random
 import numpy as np
 from collections import deque
-from tqdm import tqdm
 from copy import deepcopy
 import matplotlib.pyplot as plt
 from evaluate import evaluate_HIV
