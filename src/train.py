@@ -13,9 +13,7 @@ import torch.nn as nn
 import torch.optim as optim
 import random
 import numpy as np
-from collections import deque
 from copy import deepcopy
-import matplotlib.pyplot as plt
 from evaluate import evaluate_HIV
 
 # Device
@@ -191,6 +189,3 @@ class ProjectAgent:
 if __name__ == "__main__":
     agent = ProjectAgent()
     rewards, scores = agent.train(200)
-
-    plt.plot(scores)
-    plt.show()
