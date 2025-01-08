@@ -23,7 +23,7 @@ from evaluate import evaluate_HIV
 DEVICE = torch.device("mps" if torch.backends.mps.is_available() else ("cuda" if torch.cuda.is_available() else "cpu"))
 print(f"Device used: {DEVICE}")
 
-# Define the neural network for DQN
+# DQN
 class QNetwork(nn.Module):
     def __init__(self, input_dim, output_dim):
         super(QNetwork, self).__init__()
@@ -65,7 +65,7 @@ class ReplayBuffer:
 # Don't modify the methods names and signatures, but you can add methods.
 # ENJOY!
 class ProjectAgent:
-    def __init__(self, buffer_size=10000, batch_size=128, lr=1e-3):
+    def __init__(self, buffer_size=10000, batch_size=256, lr=1e-3):
         self.state_dim = env.observation_space.shape[0]
         self.action_dim = env.action_space.n
         self.batch_size = batch_size
@@ -76,8 +76,8 @@ class ProjectAgent:
         self.epsilon_max = 1.0
         self.epsilon_min = 0.01
         self.epsilon_decay = 0.995
-        self.epsilon_delay = 1500
-        self.epsilon_step = (self.epsilon_max - self.epsilon_min) / 20000
+        self.epsilon_delay = 600
+        self.epsilon_step = (self.epsilon_max - self.epsilon_min) / 15000
 
         # Q-Networks
         self.q_network = QNetwork(self.state_dim, self.action_dim).to(self.device)
@@ -113,7 +113,7 @@ class ProjectAgent:
         torch.save(self.q_network.state_dict(), path)
     
     def load(self):
-        self.q_network.load_state_dict(torch.load("q_network_best_final2.pth", map_location=self.device, weights_only=True))
+        self.q_network.load_state_dict(torch.load("q_network_best_final.pth", map_location=self.device, weights_only=True))
 
     def gradient_step(self, double_dqn=False):
         if len(self.replay_buffer) > self.batch_size:
@@ -144,56 +144,54 @@ class ProjectAgent:
         step = 0
         best_score = -np.inf
 
-        with tqdm(total=max_episode, desc="Training Episodes") as episode_bar:
-            while episode < max_episode:
-                # update epsilon
-                if step > self.epsilon_delay:
-                    epsilon = max(self.epsilon_min, epsilon - self.epsilon_step)
-                if np.random.rand() < epsilon:
-                    action = env.action_space.sample()
-                else:
-                    action = self.act(state)
-                # step
-                next_state, reward, done, trunc, _ = env.step(action)
-                self.replay_buffer.append(state, action, reward, next_state, done)
-                episode_cum_reward += reward
-                # train
-                for _ in range(self.nb_gradient_steps):
-                    self.gradient_step(double_dqn=False)
-                # update target network if needed
-                if self.update_target_strategy == 'replace':
-                    if step % self.update_target_freq == 0: 
-                        self.target_network.load_state_dict(self.q_network.state_dict())
-                if self.update_target_strategy == 'ema':
-                    target_state_dict = self.target_network.state_dict()
-                    model_state_dict = self.q_network.state_dict()
-                    tau = self.update_target_tau
-                    for key in model_state_dict:
-                        target_state_dict[key] = tau*model_state_dict[key] + (1-tau)*target_state_dict[key]
-                    self.target_network.load_state_dict(target_state_dict)
-                # next step
-                step += 1
-                if done or trunc:
-                    score = evaluate_HIV(self, nb_episode=1)
-                    episode_scores.append(score)
-                    episode += 1
-                    episode_rewards.append(episode_cum_reward)
-                    episode_bar.set_postfix({"Episode Return": episode_cum_reward, "Epsilon": epsilon})
-                    episode_bar.update(1)
-                    state, _ = env.reset()
-                    episode_cum_reward = 0
-                    # Save the best model
-                    if episode_scores[-1] > best_score:
-                        best_score = episode_scores[-1]
-                        self.save("q_network_best.pth")
+        while episode < max_episode:
+            # update epsilon
+            if step > self.epsilon_delay:
+                epsilon = max(self.epsilon_min, epsilon - self.epsilon_step)
+            if np.random.rand() < epsilon:
+                action = env.action_space.sample()
+            else:
+                action = self.act(state)
+            # step
+            next_state, reward, done, trunc, _ = env.step(action)
+            self.replay_buffer.append(state, action, reward, next_state, done)
+            episode_cum_reward += reward
+            # train
+            for _ in range(self.nb_gradient_steps):
+                self.gradient_step(double_dqn=False)
+            # update target network if needed
+            if self.update_target_strategy == 'replace':
+                if step % self.update_target_freq == 0: 
+                    self.target_network.load_state_dict(self.q_network.state_dict())
+            if self.update_target_strategy == 'ema':
+                target_state_dict = self.target_network.state_dict()
+                model_state_dict = self.q_network.state_dict()
+                tau = self.update_target_tau
+                for key in model_state_dict:
+                    target_state_dict[key] = tau*model_state_dict[key] + (1-tau)*target_state_dict[key]
+                self.target_network.load_state_dict(target_state_dict)
+            # next step
+            step += 1
+            if done or trunc:
+                score = evaluate_HIV(self, nb_episode=1)
+                episode_scores.append(score)
+                episode += 1
+                episode_rewards.append(episode_cum_reward)
+                state, _ = env.reset()
+                episode_cum_reward = 0
+                # Save the best model
+                if episode_scores[-1] > best_score:
+                    best_score = episode_scores[-1]
+                    self.save("q_network_best.pth")
+                print("Episode: {} | Score: {:.2f} | Epsilon: {:.2f}".format(episode, episode_scores[-1], epsilon))
 
-                else:
-                    state = next_state
+            else:
+                state = next_state
         return episode_rewards, episode_scores
 
 if __name__ == "__main__":
     agent = ProjectAgent()
-    rewards, scores = agent.train(300)
+    rewards, scores = agent.train(200)
 
     plt.plot(scores)
     plt.show()
